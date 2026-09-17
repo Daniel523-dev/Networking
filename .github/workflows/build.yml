@@ -46,7 +46,7 @@ jobs:
             --output-dir=dist `
             Encryption.py
 
-          # 2. Build network with Encryption embedded (using your working setup)
+          # 2. Build network with Encryption embedded
           python -m nuitka `
             --module `
             --include-module=Encryption `
@@ -77,14 +77,16 @@ jobs:
             --output-dir=dist \
             network.py
 
-      - name: Upload Windows Artifacts (.pyd & .dll)
+      - name: Upload Windows Artifacts (.pyd & .dll only)
         if: runner.os == 'Windows'
         uses: actions/upload-artifact@v4
         with:
           name: ${{ matrix.artifact }}
-          path: dist/*
+          path: |
+            dist/*.pyd
+            dist/*.dll
 
-      - name: Upload Linux Artifacts (.so)
+      - name: Upload Linux Artifacts (.so only)
         if: runner.os == 'Linux'
         uses: actions/upload-artifact@v4
         with:
