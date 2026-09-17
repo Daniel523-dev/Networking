@@ -35,7 +35,6 @@ jobs:
             --include-module=util `
             --include-package=cryptography `
             --include-package=argon2 `
-            --include-package=numpy `
             --output-dir=dist `
             network.py
 
