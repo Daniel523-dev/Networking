@@ -44,10 +44,6 @@ jobs:
             --module `
             --include-module=Encryption `
             --include-module=util `
-            --include-package=cryptography `
-            --include-package-data=cryptography `
-            --include-package=argon2 `
-            --include-package-data=argon2 `
             --output-dir=dist `
             network.py
 
@@ -59,10 +55,6 @@ jobs:
             --module \
             --include-module=Encryption \
             --include-module=util \
-            --include-package=cryptography \
-            --include-package-data=cryptography \
-            --include-package=argon2 \
-            --include-package-data=argon2 \
             --output-dir=dist \
             network.py
 
