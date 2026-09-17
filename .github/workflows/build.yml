@@ -15,7 +15,7 @@ jobs:
       matrix:
         include:
           - os: windows-latest
-            artifact: network-windows-pyd
+            artifact: network-windows-binaries
           - os: ubuntu-latest
             artifact: network-linux-so
 
@@ -36,10 +36,17 @@ jobs:
           python -m pip install nuitka
           python -m pip install cryptography argon2-cffi numpy
 
-      - name: Build network.py (Windows)
+      - name: Build modules (Windows)
         if: runner.os == 'Windows'
         shell: pwsh
         run: |
+          # 1. Build Encryption as its own independent module
+          python -m nuitka `
+            --module `
+            --output-dir=dist `
+            Encryption.py
+
+          # 2. Build network with Encryption embedded (using your working setup)
           python -m nuitka `
             --module `
             --include-module=Encryption `
@@ -47,10 +54,22 @@ jobs:
             --output-dir=dist `
             network.py
 
-      - name: Build network.py (Linux)
+          # 3. Duplicate all .pyd files as .dll files for other languages
+          Get-ChildItem -Path dist/*.pyd | ForEach-Object {
+              Copy-Item $_.FullName -Destination ($_.FullName -replace '\.pyd$', '.dll')
+          }
+
+      - name: Build modules (Linux)
         if: runner.os == 'Linux'
         shell: bash
         run: |
+          # Build Encryption standalone
+          python -m nuitka \
+            --module \
+            --output-dir=dist \
+            Encryption.py
+
+          # Build network with Encryption embedded
           python -m nuitka \
             --module \
             --include-module=Encryption \
@@ -58,14 +77,14 @@ jobs:
             --output-dir=dist \
             network.py
 
-      - name: Upload Windows .pyd
+      - name: Upload Windows Artifacts (.pyd & .dll)
         if: runner.os == 'Windows'
         uses: actions/upload-artifact@v4
         with:
           name: ${{ matrix.artifact }}
-          path: dist/*.pyd
+          path: dist/*
 
-      - name: Upload Linux shared library
+      - name: Upload Linux Artifacts (.so)
         if: runner.os == 'Linux'
         uses: actions/upload-artifact@v4
         with:
