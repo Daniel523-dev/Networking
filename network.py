@@ -216,9 +216,9 @@ class TCPConnection:
             try: self.sock.close()
             except OSError: pass
 class TCPServer:
-    def __init__(self,host,port,backlog=100,on_exchange=None,auth_key_dir=None):
+    def __init__(self,host,port,backlog=100,on_exchange = None,auth_key_dir = None, auth_keys = 64):
         if not is_path_valid(auth_key_dir):raise ValueError('An auth key directory is required')
-        create_auth_keys(auth_key_dir)
+        create_auth_keys(auth_key_dir,auth_keys)
         self.auth_key_dir=auth_key_dir
         self.host,self.port,self.backlog=host,port,backlog
         self.on_exchange=on_exchange
