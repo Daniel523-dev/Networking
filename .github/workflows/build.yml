@@ -1,4 +1,3 @@
-```yaml
 name: Build Nuitka Modules
 
 on:
@@ -76,4 +75,3 @@ jobs:
         with:
           name: ${{ matrix.artifact }}
           path: dist/*.so
-```
