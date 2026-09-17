@@ -36,7 +36,7 @@ jobs:
           python -m pip install nuitka
           python -m pip install cryptography argon2-cffi numpy
 
-      - name: Build network.py
+      - name: Build network.py (Windows)
         if: runner.os == 'Windows'
         shell: pwsh
         run: |
@@ -45,11 +45,13 @@ jobs:
             --include-module=Encryption `
             --include-module=util `
             --include-package=cryptography `
+            --include-package-data=cryptography `
             --include-package=argon2 `
+            --include-package-data=argon2 `
             --output-dir=dist `
             network.py
 
-      - name: Build network.py
+      - name: Build network.py (Linux)
         if: runner.os == 'Linux'
         shell: bash
         run: |
@@ -58,7 +60,9 @@ jobs:
             --include-module=Encryption \
             --include-module=util \
             --include-package=cryptography \
+            --include-package-data=cryptography \
             --include-package=argon2 \
+            --include-package-data=argon2 \
             --output-dir=dist \
             network.py
 
