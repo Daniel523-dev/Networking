@@ -314,7 +314,7 @@ class TCPServer:
                     continue
                 if (self.on_exchange != None) and (eid not in self.queues.exchanges):threading.Thread(target=self._run_exchange,args=(eid,payload,c.ID),daemon=True).start()
                 else:
-                    try:self.queues.add(eid,payload)
+                    try:self.queues.add(eid,c.ID,payload)
                     except MemoryError:
                         c.close()
                         with self.connections_lock:self.connections.discard(c)
@@ -363,7 +363,7 @@ class TCPClient:
                 except RecvCooldownError:time.sleep(0.05)
                 except (ConnectionError, OSError):break
                 if (self.on_callback is not None) and (eid not in self.queues.exchanges):threading.Thread(target=self._run_callback, args=(self, eid, payload), daemon=True).start()
-                else:self.queues.add(eid, payload)
+                else:self.queues.add(eid, b'' , payload)
         finally:self.running = False
     def _run_callback(self, eid, payload):
         try:self.on_callback(self, eid, payload)
