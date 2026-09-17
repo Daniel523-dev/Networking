@@ -1,4 +1,5 @@
-name: Build Nuitka DLL
+```yaml
+name: Build Nuitka Modules
 
 on:
   push:
@@ -8,7 +9,16 @@ on:
 
 jobs:
   build:
-    runs-on: windows-latest
+    name: Build ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+
+    strategy:
+      matrix:
+        include:
+          - os: windows-latest
+            artifact: network-windows-pyd
+          - os: ubuntu-latest
+            artifact: network-linux-so
 
     steps:
       - name: Checkout repository
@@ -24,10 +34,12 @@ jobs:
 
       - name: Install dependencies
         run: |
-          pip install nuitka
-          pip install cryptography argon2-cffi numpy
+          python -m pip install nuitka
+          python -m pip install cryptography argon2-cffi numpy
 
-      - name: Build network.py as DLL
+      - name: Build network.py
+        if: runner.os == 'Windows'
+        shell: pwsh
         run: |
           python -m nuitka `
             --module `
@@ -38,8 +50,30 @@ jobs:
             --output-dir=dist `
             network.py
 
-      - name: Upload DLL
+      - name: Build network.py
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          python -m nuitka \
+            --module \
+            --include-module=Encryption \
+            --include-module=util \
+            --include-package=cryptography \
+            --include-package=argon2 \
+            --output-dir=dist \
+            network.py
+
+      - name: Upload Windows .pyd
+        if: runner.os == 'Windows'
         uses: actions/upload-artifact@v4
         with:
-          name: network-dll
-          path: dist/*
+          name: ${{ matrix.artifact }}
+          path: dist/*.pyd
+
+      - name: Upload Linux shared library
+        if: runner.os == 'Linux'
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.artifact }}
+          path: dist/*.so
+```
