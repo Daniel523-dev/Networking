@@ -17,37 +17,25 @@ def create_auth_keys(d, n):
         prv, pub = os.path.join(d, s+'.prv'), os.path.join(d, s+'.pub')
         if os.path.isfile(prv) and os.path.isfile(pub):
             try:
-                # Fix: Use 'with' blocks for reading
-                with open(prv, 'rb') as f:
-                    p_bytes = f.read()
-                with open(pub, 'rb') as f:
-                    b_bytes = f.read()
-                    
+                with open(prv, 'rb') as f:p_bytes = f.read()
+                with open(pub, 'rb') as f:b_bytes = f.read()
                 tk = Encryption.gen_x25519(True)
                 if Encryption.shared_secret(tk[0], b_bytes) == Encryption.shared_secret(p_bytes, tk[1]):
                     pairs.append((prv, pub))
                     continue
-            except Exception: 
-                pass
+            except Exception:pass
         for p in (prv, pub):
             if os.path.exists(p): os.path.exists(p) and os.remove(p)  
-
     while len(pairs) < n:
         try:
             prv_b, pub_b = Encryption.gen_x25519(True)
             fid = Encryption.gen_id()
             fid = fid.hex() if isinstance(fid, bytes) else str(fid)
             prv, pub = os.path.join(d, fid+'.prv'), os.path.join(d, fid+'.pub')
-            
-            # Fix: Use 'with' blocks for writing
-            with open(prv, 'wb') as f:
-                f.write(prv_b)
-            with open(pub, 'wb') as f:
-                f.write(pub_b)
-                
+            with open(prv, 'wb') as f:f.write(prv_b)
+            with open(pub, 'wb') as f:f.write(pub_b)
             pairs.append((prv, pub))
-        except Exception: 
-            break
+        except Exception:break
     return pairs
 def is_path_valid(path_str):
     try:
@@ -60,7 +48,6 @@ class ProtocolError(Exception):
         super().__init__(*args,*kwargs)
         print('protocol error')
         print(args,kwargs)
-class RecvCooldownError(Exception):pass
 def recv_exact(sock, size):
     data = bytearray()
     start=time.perf_counter()
@@ -168,7 +155,6 @@ class TCPConnection:
         self.sock, self.shared_secret, self.buffer = sock, encryption_key, bytearray()
         self.send_lock, self.close_lock, self.closed = threading.Lock(), threading.Lock(), False
         self.ID = client_id
-        self.last_data = 0.0
         self.newest_rx_time = 0.0
     def send(self, payload, eid=None):
         if self.closed: raise ConnectionError("Connection closed")
@@ -195,7 +181,6 @@ class TCPConnection:
             if len(self.buffer) > 1: del self.buffer[:-1]
             self._more()
     def recv(self):
-        if (time.monotonic()-self.last_data)<0.1:raise RecvCooldownError
         while True:
             self._start()
             while len(self.buffer) < HEADER_SIZE: self._more()
@@ -213,7 +198,6 @@ class TCPConnection:
                         msg_time = struct.unpack("!d", decrypted[:8])[0]
                         if msg_time <= self.newest_rx_time:break
                         self.newest_rx_time = msg_time
-                        self.last_data=time.monotonic()
                         return eid, decrypted[8:]
                     except ProtocolError: break
                     except Exception as e:
@@ -307,7 +291,6 @@ class TCPServer:
                 c=next((x for x in cs if x.sock is sock),None)
                 if c == None:continue
                 try:eid,payload=c.recv()
-                except RecvCooldownError:continue
                 except (ConnectionError,OSError):
                     c.close()
                     with self.connections_lock:self.connections.discard(c)
@@ -360,10 +343,9 @@ class TCPClient:
         try:
             while self.running:
                 try:eid, payload = self.connection.recv()
-                except RecvCooldownError:time.sleep(0.05)
                 except (ConnectionError, OSError):break
                 if (self.on_callback is not None) and (eid not in self.queues.exchanges):threading.Thread(target=self._run_callback, args=(eid, payload), daemon=True).start()
-                else:self.queues.add(eid, b'' , payload)
+                else:self.queues.add(eid, b'', payload)
         finally:self.running = False
     def _run_callback(self, eid, payload):
         try:self.on_callback(self, eid, payload)
