@@ -201,6 +201,7 @@ class TCPConnection:
                         return eid, decrypted[8:]
                     except ProtocolError: break
                     except Exception as e:
+                        traceback.print_exception(e)
                         self.close()
                         raise ConnectionError("Invalid encrypted message") from e
                 if len(self.buffer) >= expected:
@@ -335,7 +336,10 @@ class TCPClient:
         sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         sock.connect((host, port))
         try:self.connection = TCPConnection(sock, self.setup_connection(sock), Encryption.gen_id(), False)
-        except Exception:sock.close();raise
+        except Exception as e:
+            traceback.print_exception(e)
+            sock.close()
+            raise e
         self.running = True
         self.receiver_thread = threading.Thread(target=self._receive_loop, daemon=True)
         self.receiver_thread.start()
