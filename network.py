@@ -148,6 +148,15 @@ class EIDQueues:
                     wait = deadline - time.monotonic()
                     if wait <= 0:raise TimeoutError("Timed out waiting for EID")
                 self.condition.wait(min(wait, QUEUE_TTL))
+    def expect(self, eid, cid=b''):
+        with self.condition:
+            self._cleanup()
+            if eid not in self.queues:
+                self.queues[eid] = queue.Queue()
+                self.eid_cid[eid] = cid
+                self.timestamps[eid] = time.monotonic()
+                if cid not in self.sizes:
+                    self.sizes[cid] = 0
 class TCPConnection:
     def __init__(self, sock, encryption_key, client_id=None, server=True):
         self.type_flag=b'1' if server else b'0'
@@ -259,7 +268,7 @@ class TCPServer:
             nonce=os.urandom(256)
             sock.sendall(Encryption.encryptGCM(nonce,ekey))
             sock.sendall(Encryption.encryptGCM(Encryption.ed25519_sign(test_pair[0],Encryption.decryptGCM(recv_exact(sock,256 + GCM_OVERHEAD),ekey)),ekey))
-            if Encryption.ed25519_verify(pub,Encryption.decryptGCM(recv_exact(sock,370 + GCM_OVERHEAD),ekey)) != nonce:raise ProtocolError('AUTHENTICATION CHECK INVALID!') # the verify function will thow an error on invalid signatue, if ProtocolError is thrown here, something is funky
+            if Encryption.ed25519_verify(pub,Encryption.decryptGCM(recv_exact(sock,370 + GCM_OVERHEAD),ekey)) != nonce:raise ProtocolError('AUTHENTICATION CHECK INVALID!') 
             return out
         except Exception as e:
             traceback.print_exception(e)
@@ -304,13 +313,22 @@ class TCPServer:
                         with self.connections_lock:self.connections.discard(c)
                         continue
     def _run_exchange(self,eid,payload,client_id):
+        self.queues.add(eid, client_id)
         try:self.on_exchange(self,eid,payload,client_id)
         except Exception as e:traceback.print_exception(e)
+    def expect(self, eid, client_id=None):
+        if client_id is None:
+            with self.connections_lock:
+                c = next(iter(self.connections), None)
+                client_id = c.ID if c else b''
+        self.queues.expect(eid, client_id)
     def recv(self,eid,timeout=None):return self.queues.recv(eid,timeout)
     def send(self,payload,eid=None):
         with self.connections_lock:c=next(iter(self.connections),None)
         if c == None:raise ConnectionError("No connections")
-        return c.send(payload,eid)
+        eid = c.send(payload,eid)
+        self.queues.add(eid, c.ID)
+        return eid
     def close(self):
         if not self.running:return
         self.running=False
@@ -352,6 +370,7 @@ class TCPClient:
                 else:self.queues.add(eid, b'', payload)
         finally:self.running = False
     def _run_callback(self, eid, payload):
+        self.queues.add(eid, b'')
         try:self.on_callback(self, eid, payload)
         except Exception as e:traceback.print_exception(e)
     def setup_connection(self,sock):
@@ -374,7 +393,11 @@ class TCPClient:
         return ekey
     def send(self,payload,eid=None):
         if self.connection == None:raise RuntimeError("Not connected")
-        return self.connection.send(payload,eid)
+        eid = self.connection.send(payload,eid)
+        self.queues.add(eid, b'')
+        return eid
+    def expect(self, eid):
+        self.queues.expect(eid, b'')
     def recv(self,eid,timeout=None):return self.queues.recv(eid,timeout)
     def close(self):
         self.running=False
