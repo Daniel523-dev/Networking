@@ -79,7 +79,6 @@ jobs:
             --include-module=util \
             --output-dir=dist \
             --lto=yes \
-            --python-flag=O \
             network.py
 
       - name: Upload Windows Artifacts (.pyd & .dll only)
