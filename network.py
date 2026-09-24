@@ -1,9 +1,39 @@
 import os, util, queue, hmac, zmq, threading, Encryption
 HANDSHAKE_EID = b"__HANDSHAKE__"
 MAX_QUEUE_BYTES = 128 * 1024 * 1024  # 128 MB limit
+def create_auth_keys(d, n):
+    os.makedirs(d, exist_ok=True)
+    [os.remove(os.path.join(d, f)) for f in os.listdir(d) if os.path.isfile(os.path.join(d, f)) and not f.endswith(('.prv', '.pub'))]
+    stems = {os.path.splitext(f)[0] for f in os.listdir(d) if f.endswith(('.prv', '.pub'))}
+    pairs = []
+    for s in stems:
+        prv, pub = os.path.join(d, s+'.prv'), os.path.join(d, s+'.pub')
+        if os.path.isfile(prv) and os.path.isfile(pub):
+            try:
+                with open(prv, 'rb') as f:p_bytes = f.read()
+                with open(pub, 'rb') as f:b_bytes = f.read()
+                tk = Encryption.gen_x25519(True)
+                if Encryption.shared_secret(tk[0], b_bytes) == Encryption.shared_secret(p_bytes, tk[1]):
+                    pairs.append((prv, pub))
+                    continue
+            except Exception:pass
+        for p in (prv, pub):
+            if os.path.exists(p): os.path.exists(p) and os.remove(p)  
+    while len(pairs) < n:
+        try:
+            prv_b, pub_b = Encryption.gen_x25519(True)
+            fid = Encryption.gen_id()
+            fid = fid.hex() if isinstance(fid, bytes) else str(fid)
+            prv, pub = os.path.join(d, fid+'.prv'), os.path.join(d, fid+'.pub')
+            with open(prv, 'wb') as f:f.write(prv_b)
+            with open(pub, 'wb') as f:f.write(pub_b)
+            pairs.append((prv, pub))
+        except Exception:break
+    return pairs
 class ProtocolError(Exception): pass
 class TCPServer:
-    def __init__(self, host, port, auth_key_dir="./keys", on_exchange=None):
+    def __init__(self, host, port, auth_key_dir="./keys", keys=64, on_exchange=None):
+        create_auth_keys(auth_key_dir,keys)
         self.auth_key_dir, self.on_exchange = auth_key_dir, on_exchange
         self.sock = zmq.Context.instance().socket(zmq.ROUTER)
         self.sock.bind(f"tcp://{host}:{port}")
