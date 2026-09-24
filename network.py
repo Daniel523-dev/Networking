@@ -82,7 +82,8 @@ class TCPServer:
                     data = Encryption.decryptGCM(payload[8:], ekey, aad=eid + ctr + b"0")
                     if self.on_exchange:threading.Thread(target=self.on_exchange, args=(self, eid, data, cid), daemon=True).start()
             except zmq.ZMQError: break
-    def send(self, payload, eid, client_id=None):
+    def send(self, payload, eid=None, client_id=None):
+        if eid==None:eid=util.str_to_bytes(Encryption.gen_id())
         with self._lock:
             cid = client_id or self._eid_map.pop(eid, None)
             ekey, sc = self._keys[cid], self._counters[cid][0]
@@ -122,8 +123,8 @@ class TCPClient:
     def _recv_enc(self, eid, raw_payload):
         ctr = raw_payload[:8]; self.rc += 1
         return Encryption.decryptGCM(raw_payload[8:], self.ekey, aad=eid + ctr + b"1")
-    def send(self, payload) -> bytes:
-        eid = util.str_to_bytes(Encryption.gen_id())
+    def send(self, payload, eid=None) -> bytes:
+        if eid==None:eid = util.str_to_bytes(Encryption.gen_id())
         with self._lock: self._pending[eid] = queue.Queue()
         self._send_enc(eid, payload)
         return eid
