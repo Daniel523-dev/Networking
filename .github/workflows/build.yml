@@ -52,6 +52,9 @@ jobs:
             --include-module=Encryption `
             --include-module=util `
             --output-dir=dist `
+            --enable-plugin=tk-inter `
+            --lto=yes `
+            --python-flag=O `
             network.py
 
           # 3. Duplicate all .pyd files as .dll files for other languages
@@ -75,6 +78,8 @@ jobs:
             --include-module=Encryption \
             --include-module=util \
             --output-dir=dist \
+            --lto=yes \
+            --python-flag=O \
             network.py
 
       - name: Upload Windows Artifacts (.pyd & .dll only)
