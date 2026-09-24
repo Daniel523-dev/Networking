@@ -2,7 +2,7 @@ from cryptography.hazmat.primitives.serialization import load_der_private_key, l
 from cryptography.x509 import NameAttribute, Name, load_der_x509_certificate, CertificateBuilder, random_serial_number, BasicConstraints, load_pem_x509_certificate,DNSName,SubjectAlternativeName,IPAddress
 from cryptography.hazmat.primitives.asymmetric import x25519, ed25519, ec, ed448, x448
 from cryptography.hazmat.primitives.ciphers.algorithms import AES, ChaCha20
-from cryptography.hazmat.primitives.ciphers.aead import ChaCha20Poly1305
+from cryptography.hazmat.primitives.ciphers.aead import ChaCha20Poly1305, AESGCM
 from cryptography.hazmat.primitives.ciphers import Cipher, modes
 from datetime import datetime, timedelta, timezone
 from argon2.low_level import hash_secret_raw, Type
@@ -13,10 +13,10 @@ def gen_id(length=64):return ''.join(secrets.choice(string.ascii_letters+string.
 try:
     import blake3
     def HASH(d,l=32,hex=False):
-        h=blake3.blake3(d).digest(l)
-        return util.to_hex(h) if hex else h
+        if hex:return blake3.blake3(d).hexdigest(l)
+        return blake3.blake3(d).digest(l)
     def basic_kdf(master_pw: bytes, salt: bytes, length: int = 32) -> bytes:
-        return blake3.blake3(master_pw + salt, derive_key="kdf").digest(length)
+        return blake3.blake3(master_pw + salt).digest(length)
 except ImportError:
     from cryptography.hazmat.primitives.kdf.hkdf import HKDF
     from cryptography.hazmat.primitives import hashes
@@ -47,22 +47,11 @@ def decrypt(encrypted: bytes, key: bytes, secure_kdf=False) -> bytes:
     return bytes(out + cipher.finalize())
 def encryptGCM(data: bytes, key: bytes, secure_kdf=False, aad: bytes = None) -> bytes:
     salt, iv = os.urandom(32), os.urandom(12)
-    encryptor = Cipher(AES(kdf_fast(key, salt) if secure_kdf else basic_kdf(key, salt)), modes.GCM(iv)).encryptor()
-    if aad is not None:encryptor.authenticate_additional_data(aad)
-    ct, mv = bytearray(iv + salt), memoryview(data)
-    for i in range(0, len(mv), 32768):ct.extend(encryptor.update(mv[i:i+32768]))
-    ct.extend(encryptor.finalize()) 
-    ct.extend(encryptor.tag)
-    return bytes(ct)
+    return iv + salt + AESGCM(kdf_fast(key, salt) if secure_kdf else basic_kdf(key, salt)).encrypt(iv, data, aad)
 def decryptGCM(encrypted: bytes, key: bytes, secure_kdf=False, aad: bytes = None) -> bytes:
     if len(encrypted) < 60:raise ValueError("Ciphertext too short")
     salt = encrypted[12:44]
-    decryptor = Cipher(AES(kdf_fast(key, salt) if secure_kdf else basic_kdf(key, salt)), modes.GCM(encrypted[:12], encrypted[-16:])).decryptor()
-    if aad is not None:decryptor.authenticate_additional_data(aad)
-    mv, out = memoryview(encrypted[44:-16]), bytearray()
-    for i in range(0, len(mv), 32768):out.extend(decryptor.update(mv[i:i+32768]))
-    out.extend(decryptor.finalize())
-    return bytes(out)
+    return AESGCM(kdf_fast(key, salt) if secure_kdf else basic_kdf(key, salt)).decrypt(encrypted[:12], encrypted[44:], aad)
 # generate_tls is black magic, and I don't really trust it THAT much, but it gets the job done
 def generate_tls(cert_path,key_path,common_name="TLS Certificate",country=None,state=None,locality=None,organization=None,organizational_unit=None,email=None,valid_days=3650,san_ips=None,san_dns=None):
     if os.path.exists(cert_path) and os.path.exists(key_path): return
