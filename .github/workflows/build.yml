@@ -34,7 +34,7 @@ jobs:
       - name: Install dependencies
         run: |
           python -m pip install nuitka
-          python -m pip install cryptography argon2-cffi numpy pyzmq blake3
+          python -m pip install cryptography argon2-cffi numpy pyzmq blake3 tornato
 
       - name: Build modules (Windows)
         if: runner.os == 'Windows'
