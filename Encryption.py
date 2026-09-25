@@ -8,9 +8,7 @@ from datetime import datetime, timedelta, timezone
 from argon2.low_level import hash_secret_raw, Type
 from cryptography.hazmat.primitives import hashes
 from cryptography.x509.oid import NameOID
-import os, hmac, ipaddress, util, secrets
-
-def gen_id(length=64):return secrets.token_urlsafe((length * 3) // 4 + 1)[:length]
+import os, hmac, ipaddress, util
 try:
     import blake3
     def HASH(d,l=32,hex=False):
