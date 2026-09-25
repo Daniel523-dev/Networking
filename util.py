@@ -101,4 +101,3 @@ def bytes_to_str(data):
     except:pass
     return data
 def get_folder_size(folder_path):return sum(sum(os.path.getsize(path+os.sep+f) for f in files if os.path.exists(path+os.sep+f)) for path,_,files in os.walk(folder_path) if os.path.exists(path))
-compress(b'test')
