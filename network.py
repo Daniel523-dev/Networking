@@ -1,5 +1,4 @@
 import os
-import util
 import queue
 import hmac
 import zmq
@@ -40,24 +39,27 @@ class TCPServer:
     def __init__(self, host, port, auth_key_dir="./keys", keys=64, on_exchange=None):
         create_auth_keys(auth_key_dir, keys)
         self.auth_key_dir, self.on_exchange = auth_key_dir, on_exchange
-        self.sock = zmq.Context.instance().socket(zmq.ROUTER)
+        self.context = zmq.Context()
+        self.sock = self.context.socket(zmq.ROUTER)
         self.sock.bind(f"tcp://{host}:{port}")
         self._eid_map, self._keys, self._handshakes, self._counters = {}, {}, {}, {}
         self._q_bytes = {}
         self._seen_eids = {}
-        self._lock, self._send_lock, self._running = threading.Lock(), threading.Lock(), True
+        self._send_q = queue.Queue()
+        self._lock, self._running = threading.Lock(), True
         self._io_thread = threading.Thread(target=self._loop, daemon=True)
         self._io_thread.start()
     def _hs_worker(self, cid, client_temp_pub):
         try:
             tk = Encryption.gen_x25519(True)
-            with self._send_lock:self.sock.send_multipart([cid, HANDSHAKE_EID, tk[1]])
+            self._send_q.put((cid, HANDSHAKE_EID, tk[1]))
             tss = Encryption.shared_secret(tk[0], client_temp_pub)
             _hash = Encryption.decryptGCM(self._handshakes[cid].get(timeout=5), tss)
             auth_file = ""
             if os.path.exists(self.auth_key_dir):
                 for x in os.listdir(self.auth_key_dir):
-                    if x.endswith(".pub") and hmac.compare_digest(_hash, Encryption.basic_kdf(open(os.path.join(self.auth_key_dir, x), "rb").read(), b'', 6)):auth_file = os.path.join(self.auth_key_dir, x)
+                    if x.endswith(".pub") and hmac.compare_digest(_hash, Encryption.basic_kdf(open(os.path.join(self.auth_key_dir, x), "rb").read(), b'', 6)):
+                        auth_file = os.path.join(self.auth_key_dir, x)
             if not auth_file:raise ProtocolError("Auth Denied")
             client_pub = Encryption.decryptGCM(self._handshakes[cid].get(timeout=5), tss)
             ekey = Encryption.kdf_fast(Encryption.shared_secret(open(auth_file[:-4] + ".prv", "rb").read(), client_pub), tss)
@@ -65,7 +67,7 @@ class TCPServer:
                 nonlocal sc
                 ctr = sc.to_bytes(8, "big")
                 sc += 1
-                with self._send_lock:self.sock.send_multipart([cid, HANDSHAKE_EID, ctr + Encryption.encryptGCM(data, ekey, aad=HANDSHAKE_EID + ctr + b"1")])
+                self._send_q.put((cid, HANDSHAKE_EID, ctr + Encryption.encryptGCM(data, ekey, aad=HANDSHAKE_EID + ctr + b"1")))
             def recv_enc():
                 nonlocal rc
                 payload = self._handshakes[cid].get(timeout=5)
@@ -85,7 +87,8 @@ class TCPServer:
                 self._keys[cid] = ekey
                 self._counters[cid] = [sc, rc]
                 self._handshakes.pop(cid, None)
-        except Exception:self._kill_client(cid)
+        except Exception:
+            self._kill_client(cid)
     def _kill_client(self, cid):
         with self._lock:
             self._keys.pop(cid, None)
@@ -97,7 +100,12 @@ class TCPServer:
         poller.register(self.sock, zmq.POLLIN)
         while self._running:
             try:
-                events = dict(poller.poll(100))
+                while not self._send_q.empty():
+                    item = self._send_q.get_nowait()
+                    if item is None:break
+                    cid, eid, frames = item
+                    self.sock.send_multipart([cid, eid, frames])
+                events = dict(poller.poll(10))
                 if self.sock in events and events[self.sock] == zmq.POLLIN:
                     cid, eid, payload = self.sock.recv_multipart()[:3]
                     with self._lock:
@@ -136,6 +144,7 @@ class TCPServer:
         try:
             poller.unregister(self.sock)
             self.sock.close(linger=0)
+            self.context.term()
         except Exception:pass
     def send(self, payload, eid=None, client_id=None):
         if eid is None:eid = os.urandom(64)
@@ -144,17 +153,20 @@ class TCPServer:
             ekey, sc = self._keys[cid], self._counters[cid][0]
             self._counters[cid][0] += 1
         ctr = sc.to_bytes(8, "big")
-        with self._send_lock:self.sock.send_multipart([cid, eid, ctr + Encryption.encryptGCM(payload, ekey, aad=eid + ctr + b"1")])
+        self._send_q.put((cid, eid, ctr + Encryption.encryptGCM(payload, ekey, aad=eid + ctr + b"1")))
     def close(self):
         if not self._running:return
         self._running = False
+        self._send_q.put(None)
         if threading.current_thread() != self._io_thread:self._io_thread.join(timeout=2.0)
 class TCPClient:
     def __init__(self, host, port, auth_key="./auth_key"):
-        self.sock = zmq.Context.instance().socket(zmq.DEALER)
+        self.context = zmq.Context()
+        self.sock = self.context.socket(zmq.DEALER)
         self.sock.connect(f"tcp://{host}:{port}")
         self._pending, self._hs_q = {}, queue.Queue()
-        self._lock, self._send_lock, self._running = threading.Lock(), threading.Lock(), True
+        self._send_q = queue.Queue()
+        self._lock, self._running = threading.Lock(), True
         self.sc, self.rc, self.ekey = 0, 0, None
         self._q_bytes = 0
         if auth_key.endswith(".prv"):pub_path = auth_key[:-4] + ".pub"
@@ -164,11 +176,11 @@ class TCPClient:
         self._io_thread = threading.Thread(target=self._loop, daemon=True)
         self._io_thread.start()
         tk = Encryption.gen_x25519(True)
-        with self._send_lock:self.sock.send_multipart([HANDSHAKE_EID, tk[1]])
+        self._send_q.put([HANDSHAKE_EID, tk[1]])
         tss = Encryption.shared_secret(tk[0], self._hs_q.get(timeout=5))
-        with self._send_lock:self.sock.send_multipart([HANDSHAKE_EID, Encryption.encryptGCM(Encryption.basic_kdf(pub_key, b'', 6), tss)])
+        self._send_q.put([HANDSHAKE_EID, Encryption.encryptGCM(Encryption.basic_kdf(pub_key, b'', 6), tss)])
         keys = Encryption.gen_x25519(True)
-        with self._send_lock:self.sock.send_multipart([HANDSHAKE_EID, Encryption.encryptGCM(keys[1], tss)])
+        self._send_q.put([HANDSHAKE_EID, Encryption.encryptGCM(keys[1], tss)])
         self.ekey = Encryption.kdf_fast(Encryption.shared_secret(keys[0], pub_key), tss)
         tp = Encryption.gen_ed25519(True)
         self._send_enc(HANDSHAKE_EID, tp[1])
@@ -181,7 +193,7 @@ class TCPClient:
     def _send_enc(self, eid, payload):
         ctr = self.sc.to_bytes(8, "big")
         self.sc += 1
-        with self._send_lock:self.sock.send_multipart([eid, ctr + Encryption.encryptGCM(payload, self.ekey, aad=eid + ctr + b"0")])
+        self._send_q.put([eid, ctr + Encryption.encryptGCM(payload, self.ekey, aad=eid + ctr + b"0")])
     def _recv_enc(self, eid, raw_payload):
         ctr = raw_payload[:8]
         self.rc += 1
@@ -205,11 +217,16 @@ class TCPClient:
         poller.register(self.sock, zmq.POLLIN)
         while self._running:
             try:
-                events = dict(poller.poll(100))
+                while not self._send_q.empty():
+                    frames = self._send_q.get_nowait()
+                    if frames is None:break
+                    self.sock.send_multipart(frames)
+                events = dict(poller.poll(10))
                 if self.sock in events and events[self.sock] == zmq.POLLIN:
                     eid, payload = self.sock.recv_multipart()[:2]
+                    payload_len = len(payload)
                     with self._lock:
-                        self._q_bytes += len(payload)
+                        self._q_bytes += payload_len
                         if self._q_bytes > MAX_QUEUE_BYTES:
                             self._running = False
                             break
@@ -217,13 +234,17 @@ class TCPClient:
                     else:
                         with self._lock:q = self._pending.get(eid) if eid != HANDSHAKE_EID else self._hs_q
                         if q:q.put(payload)
+                        else:
+                            with self._lock:self._q_bytes -= payload_len
             except zmq.ZMQError:break
             except Exception:break
         try:
             poller.unregister(self.sock)
             self.sock.close(linger=0)
+            self.context.term()
         except Exception:pass
     def close(self):
         if not self._running:return
         self._running = False
+        self._send_q.put(None)
         if threading.current_thread() != self._io_thread:self._io_thread.join(timeout=2.0)
