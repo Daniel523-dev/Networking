@@ -169,10 +169,7 @@ class TCPClient:
         self._lock, self._running = threading.Lock(), True
         self.sc, self.rc, self.ekey = 0, 0, None
         self._q_bytes = 0
-        if auth_key.endswith(".prv"):pub_path = auth_key[:-4] + ".pub"
-        elif auth_key.endswith(".pub"):pub_path = auth_key
-        else:pub_path = auth_key + ".pub"
-        pub_key = open(pub_path, "rb").read()
+        pub_key = open(auth_key, "rb").read()
         self._io_thread = threading.Thread(target=self._loop, daemon=True)
         self._io_thread.start()
         tk = Encryption.gen_x25519(True)
