@@ -8,8 +8,8 @@ from datetime import datetime, timedelta, timezone
 from argon2.low_level import hash_secret_raw, Type
 from cryptography.hazmat.primitives import hashes
 from cryptography.x509.oid import NameOID
-import os, hmac, ipaddress, util, string, secrets
-def gen_id(length=64):return ''.join(secrets.choice(string.ascii_letters+string.digits) for _ in range(length))
+import os, hmac, ipaddress, util, uuid
+def gen_id(length=64):return "".join(uuid.uuid4().hex for _ in range((length + 31) // 32))[:length]
 try:
     import blake3
     def HASH(d,l=32,hex=False):
