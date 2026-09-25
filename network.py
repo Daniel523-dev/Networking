@@ -28,8 +28,7 @@ def create_auth_keys(d, n):
     while len(pairs) < n:
         try:
             prv_b, pub_b = Encryption.gen_x25519(True)
-            fid = os.urandom(64)
-            fid = fid.hex() if isinstance(fid, bytes) else str(fid)
+            fid = os.urandom(64).hex()
             prv, pub = os.path.join(d, fid + '.prv'), os.path.join(d, fid + '.pub')
             with open(prv, 'wb') as f:f.write(prv_b)
             with open(pub, 'wb') as f:f.write(pub_b)
@@ -47,7 +46,8 @@ class TCPServer:
         self._q_bytes = {}
         self._seen_eids = {}
         self._lock, self._send_lock, self._running = threading.Lock(), threading.Lock(), True
-        threading.Thread(target=self._loop, daemon=True).start()
+        self._io_thread = threading.Thread(target=self._loop, daemon=True)
+        self._io_thread.start()
     def _hs_worker(self, cid, client_temp_pub):
         try:
             tk = Encryption.gen_x25519(True)
@@ -97,7 +97,8 @@ class TCPServer:
         poller.register(self.sock, zmq.POLLIN)
         while self._running:
             try:
-                if poller.poll(100):
+                events = dict(poller.poll(100))
+                if self.sock in events and events[self.sock] == zmq.POLLIN:
                     cid, eid, payload = self.sock.recv_multipart()[:3]
                     with self._lock:
                         curr = self._q_bytes.get(cid, 0) + len(payload)
@@ -127,8 +128,15 @@ class TCPServer:
                                 if len(self._seen_eids) > 10000:
                                     for k in list(self._seen_eids.keys())[:-5000]:del self._seen_eids[k]
                                 should_run = True
-                        if should_run:threading.Thread(target=self.on_exchange, args=(self, eid, data, cid), daemon=True).start()
+                        if should_run:
+                            try:self.on_exchange(self, eid, data, cid)
+                            except Exception:pass
             except zmq.ZMQError:break
+            except Exception:break
+        try:
+            poller.unregister(self.sock)
+            self.sock.close(linger=0)
+        except Exception:pass
     def send(self, payload, eid=None, client_id=None):
         if eid is None:eid = os.urandom(64)
         with self._lock:
@@ -138,8 +146,9 @@ class TCPServer:
         ctr = sc.to_bytes(8, "big")
         with self._send_lock:self.sock.send_multipart([cid, eid, ctr + Encryption.encryptGCM(payload, ekey, aad=eid + ctr + b"1")])
     def close(self):
+        if not self._running:return
         self._running = False
-        self.sock.close()
+        if threading.current_thread() != self._io_thread:self._io_thread.join(timeout=2.0)
 class TCPClient:
     def __init__(self, host, port, auth_key="./auth_key"):
         self.sock = zmq.Context.instance().socket(zmq.DEALER)
@@ -152,7 +161,8 @@ class TCPClient:
         elif auth_key.endswith(".pub"):pub_path = auth_key
         else:pub_path = auth_key + ".pub"
         pub_key = open(pub_path, "rb").read()
-        threading.Thread(target=self._loop, daemon=True).start()
+        self._io_thread = threading.Thread(target=self._loop, daemon=True)
+        self._io_thread.start()
         tk = Encryption.gen_x25519(True)
         with self._send_lock:self.sock.send_multipart([HANDSHAKE_EID, tk[1]])
         tss = Encryption.shared_secret(tk[0], self._hs_q.get(timeout=5))
@@ -181,7 +191,7 @@ class TCPClient:
         with self._lock:self._pending[eid] = queue.Queue()
         self._send_enc(eid, payload)
         return eid
-    def recv(self, eid: bytes, timeout: float = None) -> bytes:
+    def recv(self, eid:bytes, timeout:float = None) -> bytes:
         with self._lock:q = self._pending.get(eid)
         if not q:return None
         try:
@@ -195,18 +205,25 @@ class TCPClient:
         poller.register(self.sock, zmq.POLLIN)
         while self._running:
             try:
-                if poller.poll(100):
+                events = dict(poller.poll(100))
+                if self.sock in events and events[self.sock] == zmq.POLLIN:
                     eid, payload = self.sock.recv_multipart()[:2]
                     with self._lock:
                         self._q_bytes += len(payload)
                         if self._q_bytes > MAX_QUEUE_BYTES:
-                            self.close()
+                            self._running = False
                             break
                     if self.ekey is None:self._hs_q.put(payload)
                     else:
                         with self._lock:q = self._pending.get(eid) if eid != HANDSHAKE_EID else self._hs_q
                         if q:q.put(payload)
             except zmq.ZMQError:break
+            except Exception:break
+        try:
+            poller.unregister(self.sock)
+            self.sock.close(linger=0)
+        except Exception:pass
     def close(self):
+        if not self._running:return
         self._running = False
-        self.sock.close()
+        if threading.current_thread() != self._io_thread:self._io_thread.join(timeout=2.0)
