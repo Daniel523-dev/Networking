@@ -1,9 +1,4 @@
-import os
-import queue
-import hmac
-import zmq
-import threading
-import Encryption
+import os, queue, time, hmac, zmq, threading, Encryption
 HANDSHAKE_EID = b"__HANDSHAKE__"
 MAX_QUEUE_BYTES = 256 * 1024 * 1024
 def create_auth_keys(d, n):
@@ -45,6 +40,8 @@ class TCPServer:
         self._eid_map, self._keys, self._handshakes, self._counters = {}, {}, {}, {}
         self._q_bytes = {}
         self._seen_eids = {}
+        self._eid_activity = {}
+        self._last_cleanup = time.time()
         self._send_q = queue.Queue()
         self._lock, self._running = threading.Lock(), True
         self._io_thread = threading.Thread(target=self._loop, daemon=True)
@@ -58,8 +55,7 @@ class TCPServer:
             auth_file = ""
             if os.path.exists(self.auth_key_dir):
                 for x in os.listdir(self.auth_key_dir):
-                    if x.endswith(".pub") and hmac.compare_digest(_hash, Encryption.basic_kdf(open(os.path.join(self.auth_key_dir, x), "rb").read(), b'', 6)):
-                        auth_file = os.path.join(self.auth_key_dir, x)
+                    if x.endswith(".pub") and hmac.compare_digest(_hash, Encryption.basic_kdf(open(os.path.join(self.auth_key_dir, x), "rb").read(), b'', 6)):auth_file = os.path.join(self.auth_key_dir, x)
             if not auth_file:raise ProtocolError("Auth Denied")
             client_pub = Encryption.decryptGCM(self._handshakes[cid].get(timeout=5), tss)
             ekey = Encryption.kdf_fast(Encryption.shared_secret(open(auth_file[:-4] + ".prv", "rb").read(), client_pub), tss)
@@ -87,8 +83,7 @@ class TCPServer:
                 self._keys[cid] = ekey
                 self._counters[cid] = [sc, rc]
                 self._handshakes.pop(cid, None)
-        except Exception:
-            self._kill_client(cid)
+        except Exception:self._kill_client(cid)
     def _kill_client(self, cid):
         with self._lock:
             self._keys.pop(cid, None)
@@ -100,6 +95,15 @@ class TCPServer:
         poller.register(self.sock, zmq.POLLIN)
         while self._running:
             try:
+                now = time.time()
+                if now - self._last_cleanup > 10.0:
+                    self._last_cleanup = now
+                    with self._lock:
+                        expired = [e for e, t in self._eid_activity.items() if now - t > 60.0]
+                        for e in expired:
+                            self._eid_activity.pop(e, None)
+                            self._eid_map.pop(e, None)
+                            self._seen_eids.pop(e, None)
                 while not self._send_q.empty():
                     item = self._send_q.get_nowait()
                     if item is None:break
@@ -126,6 +130,7 @@ class TCPServer:
                         self._counters[cid][1] += 1
                         self._eid_map[eid] = cid
                         self._q_bytes[cid] -= len(payload)
+                        if eid != HANDSHAKE_EID:self._eid_activity[eid] = time.time()
                     ctr = payload[:8]
                     data = Encryption.decryptGCM(payload[8:], ekey, aad=eid + ctr + b"0")
                     if self.on_exchange and eid != HANDSHAKE_EID:
@@ -150,6 +155,7 @@ class TCPServer:
         if eid is None:eid = os.urandom(64)
         with self._lock:
             cid = client_id or self._eid_map.get(eid)
+            if eid != HANDSHAKE_EID:self._eid_activity[eid] = time.time()
             ekey, sc = self._keys[cid], self._counters[cid][0]
             self._counters[cid][0] += 1
         ctr = sc.to_bytes(8, "big")
@@ -166,10 +172,15 @@ class TCPClient:
         self.sock.connect(f"tcp://{host}:{port}")
         self._pending, self._hs_q = {}, queue.Queue()
         self._send_q = queue.Queue()
+        self._eid_activity = {}
+        self._last_cleanup = time.time()
         self._lock, self._running = threading.Lock(), True
         self.sc, self.rc, self.ekey = 0, 0, None
         self._q_bytes = 0
-        pub_key = open(auth_key, "rb").read()
+        if auth_key.endswith(".prv"):pub_path = auth_key[:-4] + ".pub"
+        elif auth_key.endswith(".pub"):pub_path = auth_key
+        else:pub_path = auth_key + ".pub"
+        pub_key = open(pub_path, "rb").read()
         self._io_thread = threading.Thread(target=self._loop, daemon=True)
         self._io_thread.start()
         tk = Encryption.gen_x25519(True)
@@ -197,23 +208,41 @@ class TCPClient:
         return Encryption.decryptGCM(raw_payload[8:], self.ekey, aad=eid + ctr + b"1")
     def send(self, payload, eid=None) -> bytes:
         if eid is None:eid = os.urandom(64)
-        with self._lock:self._pending[eid] = queue.Queue()
+        with self._lock:
+            self._pending[eid] = queue.Queue()
+            if eid != HANDSHAKE_EID:self._eid_activity[eid] = time.time()
         self._send_enc(eid, payload)
         return eid
     def recv(self, eid:bytes, timeout:float = None) -> bytes:
-        with self._lock:q = self._pending.get(eid)
+        with self._lock:
+            q = self._pending.get(eid)
+            if eid != HANDSHAKE_EID:self._eid_activity[eid] = time.time()
         if not q:return None
         try:
             raw = q.get(timeout=timeout)
             with self._lock:self._q_bytes -= len(raw)
             return self._recv_enc(eid, raw)
         finally:
-            with self._lock:self._pending.pop(eid, None)
+            with self._lock:
+                self._pending.pop(eid, None)
+                self._eid_activity.pop(eid, None)
     def _loop(self):
         poller = zmq.Poller()
         poller.register(self.sock, zmq.POLLIN)
         while self._running:
             try:
+                now = time.time()
+                if now - self._last_cleanup > 10.0:
+                    self._last_cleanup = now
+                    with self._lock:
+                        expired = [e for e, t in self._eid_activity.items() if now - t > 60.0]
+                        for e in expired:
+                            self._eid_activity.pop(e, None)
+                            q = self._pending.pop(e, None)
+                            if q:
+                                while not q.empty():
+                                    try:self._q_bytes -= len(q.get_nowait())
+                                    except queue.Empty:break
                 while not self._send_q.empty():
                     frames = self._send_q.get_nowait()
                     if frames is None:break
@@ -224,6 +253,7 @@ class TCPClient:
                     payload_len = len(payload)
                     with self._lock:
                         self._q_bytes += payload_len
+                        if eid != HANDSHAKE_EID:self._eid_activity[eid] = time.time()
                         if self._q_bytes > MAX_QUEUE_BYTES:
                             self._running = False
                             break
