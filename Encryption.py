@@ -32,25 +32,61 @@ def kdf_level(LEVEL):
 def kdf_fast(master_pw: bytes, salt: bytes) -> bytes:return kdf(master_pw,salt,0)
 def kdf_slow(master_pw: bytes, salt: bytes) -> bytes:return kdf(master_pw,salt,10)
 def kdf(master_pw,salt,level=5):lvl=kdf_level(level);return hash_secret_raw(secret=master_pw, salt=salt, time_cost=lvl[0], memory_cost=lvl[1], parallelism=lvl[2], hash_len=512, type=Type.ID)
-def encrypt(data: bytes, key: bytes, secure_kdf=False) -> bytes:
-    salt, iv = os.urandom(32), os.urandom(16)
-    cipher = Cipher(AES(kdf_fast(key, salt) if secure_kdf else basic_kdf(key, salt)), modes.CTR(iv)).encryptor()
-    ct, mv = bytearray(iv + salt), memoryview(data)
-    for i in range(0, len(mv), 32768): ct.extend(cipher.update(mv[i:i+32768]))
-    return bytes(ct + cipher.finalize())
-def decrypt(encrypted: bytes, key: bytes, secure_kdf=False) -> bytes:
-    if len(encrypted) < 48: raise ValueError("Ciphertext too short")
-    cipher = Cipher(AES(kdf_fast(key, encrypted[16:48]) if secure_kdf else basic_kdf(key, encrypted[16:48])), modes.CTR(encrypted[:16])).decryptor()
-    mv, out = memoryview(encrypted[48:]), bytearray()
-    for i in range(0, len(mv), 32768): out.extend(cipher.update(mv[i:i+32768]))
-    return bytes(out + cipher.finalize())
-def encryptGCM(data: bytes, key: bytes, secure_kdf=False, aad: bytes = None) -> bytes:
-    salt, iv = os.urandom(32), os.urandom(12)
-    return iv + salt + AESGCM(kdf_fast(key, salt) if secure_kdf else basic_kdf(key, salt)).encrypt(iv, data, aad)
-def decryptGCM(encrypted: bytes, key: bytes, secure_kdf=False, aad: bytes = None) -> bytes:
-    if len(encrypted) < 60:raise ValueError("Ciphertext too short")
-    salt = encrypted[12:44]
-    return AESGCM(kdf_fast(key, salt) if secure_kdf else basic_kdf(key, salt)).decrypt(encrypted[:12], encrypted[44:], aad)
+def _prepare_key(key: bytes) -> bytes:
+    """Validates key length and truncates to 32 bytes (256-bit AES)."""
+    if len(key) < 32:raise ValueError(f"Key length ({len(key)} bytes) is shorter than required 32 bytes")
+    return key[:32]
+def encrypt(data: bytes, key: bytes, secure_kdf: bool = False) -> bytes:
+    key = _prepare_key(key)
+    iv = os.urandom(16)
+    if secure_kdf:
+        salt = os.urandom(32)
+        derived_key = kdf_fast(key, salt)
+        header = iv + salt
+    else:
+        derived_key = key
+        header = iv
+    cipher = Cipher(algorithms.AES(derived_key), modes.CTR(iv)).encryptor()
+    return header + cipher.update(data) + cipher.finalize()
+def decrypt(encrypted: bytes, key: bytes, secure_kdf: bool = False) -> bytes:
+    key = _prepare_key(key)
+    min_len = 48 if secure_kdf else 16
+    if len(encrypted) < min_len:
+        raise ValueError("Ciphertext too short")
+    iv = encrypted[:16]
+    if secure_kdf:
+        salt = encrypted[16:48]
+        derived_key = kdf_fast(key, salt)
+        payload = encrypted[48:]
+    else:
+        derived_key = key
+        payload = encrypted[16:]
+    cipher = Cipher(algorithms.AES(derived_key), modes.CTR(iv)).decryptor()
+    return cipher.update(payload) + cipher.finalize()
+def encryptGCM(data: bytes, key: bytes, secure_kdf: bool = False, aad: bytes = None) -> bytes:
+    key = _prepare_key(key)
+    iv = os.urandom(12)
+    if secure_kdf:
+        salt = os.urandom(32)
+        derived_key = kdf_fast(key, salt)
+        header = iv + salt
+    else:
+        derived_key = key
+        header = iv
+    return header + AESGCM(derived_key).encrypt(iv, data, aad)
+def decryptGCM(encrypted: bytes, key: bytes, secure_kdf: bool = False, aad: bytes = None) -> bytes:
+    key = _prepare_key(key)
+    min_len = 60 if secure_kdf else 28
+    if len(encrypted) < min_len:raise ValueError("Ciphertext too short")
+    iv = encrypted[:12]
+    if secure_kdf:
+        salt = encrypted[12:44]
+        derived_key = kdf_fast(key, salt)
+        payload = encrypted[44:]
+    else:
+        derived_key = key
+        payload = encrypted[12:]
+    return AESGCM(derived_key).decrypt(iv, payload, aad)
 # generate_tls is black magic, and I don't really trust it THAT much, but it gets the job done
 def generate_tls(cert_path,key_path,common_name="TLS Certificate",country=None,state=None,locality=None,organization=None,organizational_unit=None,email=None,valid_days=3650,san_ips=None,san_dns=None):
     if os.path.exists(cert_path) and os.path.exists(key_path): return
