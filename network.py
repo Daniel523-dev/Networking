@@ -73,76 +73,91 @@ class TCPServer:
         try:
             if client_temp_pub.startswith(b"REQ_KEY"):
                 try:
-                    admin_zip_path = os.path.join(self.auth_key_dir, "auth_key")
+                    admin_zip_path = os.path.join(self.auth_key_dir,"auth_key")
                     req_tk_pub = client_temp_pub[7:]
                     stk = Encryption.gen_x25519(True)
-                    tss_req = Encryption.shared_secret(stk[0], req_tk_pub)
+                    tss_req = Encryption.shared_secret(stk[0],req_tk_pub)
                     nonce = os.urandom(32)
-                    self._send_q.put((cid, HANDSHAKE_EID, stk[1] + nonce))
-                    sig_payload = self._handshakes[cid].get(timeout=5)
-                    signature = Encryption.decryptGCM(sig_payload, tss_req)
-                    if Encryption.ed25519_verify(self.admin_ed[1], signature) != nonce:raise ProtocolError("Bad Admin Sig")
+                    self._send_q.put((cid,HANDSHAKE_EID,stk[1] + nonce))
+                    if Encryption.decryptGCM(Encryption.ed25519_verify(self.admin_ed[1],self._handshakes[cid].get(timeout=5)),tss_req) != nonce:raise ProtocolError("Bad Admin Sig")
                     prv_b, pub_b = Encryption.gen_x25519(True)
+                    self._send_q.put((cid,HANDSHAKE_EID,Encryption.ed25519_sign(self.admin_ed[0],Encryption.encryptGCM(pub_b,tss_req))))
+                    key_ack = Encryption.decryptGCM(Encryption.ed25519_verify(self.admin_ed[1],self._handshakes[cid].get(timeout=10)),tss_req)
+                    if key_ack == b'0':raise ProtocolError("Client rejected auth key")
+                    if key_ack != b'1':raise ProtocolError("Invalid auth key ACK")
                     fid = os.urandom(64).hex()
-                    prv, pub = os.path.join(self.auth_key_dir, fid + '.prv'), os.path.join(self.auth_key_dir, fid + '.pub')
-                    with open(prv, 'wb') as f:f.write(Encryption.encryptGCM(prv_b, self.at_rest_key))
-                    with open(pub, 'wb') as f:f.write(Encryption.encryptGCM(pub_b, self.at_rest_key))
-                    auth_pub_sig = Encryption.ed25519_sign(self.admin_ed[0], pub_b)
-                    auth_pub_len = len(pub_b).to_bytes(4, 'big')
-                    payload = auth_pub_len + pub_b + auth_pub_sig
-                    self._send_q.put((cid, HANDSHAKE_EID, Encryption.encryptGCM(payload, tss_req)))
+                    prv = os.path.join(self.auth_key_dir,fid + '.prv')
+                    pub = os.path.join(self.auth_key_dir,fid + '.pub')
+                    with open(prv, 'wb') as f:f.write(Encryption.encryptGCM(prv_b,self.at_rest_key))
+                    with open(pub, 'wb') as f:f.write(Encryption.encryptGCM(pub_b,self.at_rest_key))
                     client_temp_pub = self._handshakes[cid].get(timeout=10)
                 finally:
-                    salt=os.urandom(64)
-                    key=Encryption.kdf_slow(util.str_to_bytes(self.auth_key_password),salt)
+                    self.admin_ed = Encryption.gen_ed25519(True)
+                    salt = os.urandom(64)
+                    key = Encryption.kdf_slow(util.str_to_bytes(self.auth_key_password),salt)
                     try:os.remove(admin_zip_path)
                     except:pass
-                    with zipfile.ZipFile(admin_zip_path, 'w') as zf:
-                        zf.writestr('admin.prv', Encryption.encryptGCM(self.admin_ed[0],key))
-                        zf.writestr('admin.pub', Encryption.encryptGCM(self.admin_ed[1],key))
-                        zf.writestr('salt.bin', salt)
+                    with zipfile.ZipFile(admin_zip_path,'w') as zf:
+                        zf.writestr('admin.prv',Encryption.encryptGCM(self.admin_ed[0],key))
+                        zf.writestr('admin.pub',Encryption.encryptGCM(self.admin_ed[1],key))
+                        zf.writestr('salt.bin',salt)
             tk = Encryption.gen_x25519(True)
-            self._send_q.put((cid, HANDSHAKE_EID, tk[1]))
-            tss = Encryption.shared_secret(tk[0], client_temp_pub)
-            _hash = Encryption.decryptGCM(self._handshakes[cid].get(timeout=5), tss)
+            self._send_q.put((cid,HANDSHAKE_EID,tk[1]))
+            tss = Encryption.shared_secret(tk[0],client_temp_pub)
+            _hash = Encryption.decryptGCM(self._handshakes[cid].get(timeout=5),tss)
             auth_file = ""
             if os.path.exists(self.auth_key_dir):
                 for x in os.listdir(self.auth_key_dir):
                     if x.endswith(".pub"):
-                        raw_pub = Encryption.decryptGCM(open(os.path.join(self.auth_key_dir, x), "rb").read(), self.at_rest_key)
-                        if hmac.compare_digest(_hash, Encryption.basic_kdf(raw_pub, b'', 6)):
-                            auth_file = os.path.join(self.auth_key_dir, x)
+                        auth_path = os.path.join(self.auth_key_dir,x)
+                        with open(auth_path, "rb") as f:encrypted_pub = f.read()
+                        if hmac.compare_digest(_hash,Encryption.basic_kdf(Encryption.decryptGCM(encrypted_pub,self.at_rest_key),b'',6)):auth_file = auth_path
             if not auth_file:raise ProtocolError("Auth Denied")
-            client_pub = Encryption.decryptGCM(self._handshakes[cid].get(timeout=5), tss)
-            raw_prv = Encryption.decryptGCM(open(auth_file[:-4] + ".prv", "rb").read(), self.at_rest_key)
-            ekey = Encryption.kdf_fast(Encryption.shared_secret(raw_prv, client_pub), tss)
+            with open(auth_file[:-4] + ".prv","rb") as f:raw_prv = Encryption.decryptGCM(f.read(),self.at_rest_key)
+            ekey = Encryption.kdf_fast(Encryption.shared_secret(raw_prv,Encryption.decryptGCM(self._handshakes[cid].get(timeout=5),tss)),tss)
+            sc, rc = 1, 0
             def send_enc(data):
                 nonlocal sc
                 ctr = sc.to_bytes(8, "big")
                 sc += 1
-                self._send_q.put((cid, HANDSHAKE_EID, ctr + Encryption.encryptGCM(data, ekey, aad=HANDSHAKE_EID + ctr + b"1")))
+                self._send_q.put((cid,HANDSHAKE_EID,ctr + Encryption.encryptGCM(data,ekey,aad=(HANDSHAKE_EID + ctr + b"1"))))
             def recv_enc():
                 nonlocal rc
                 payload = self._handshakes[cid].get(timeout=5)
                 ctr = payload[:8]
                 _ctr = int.from_bytes(ctr,'big')
-                if _ctr<=rc:raise ProtocolError
+                if _ctr <= rc:raise ProtocolError('Counter Error')
                 rc = _ctr
-                return Encryption.decryptGCM(payload[8:], ekey, aad=HANDSHAKE_EID + ctr + b"0")
-            sc, rc = 1, 0
+                return Encryption.decryptGCM(payload[8:],ekey,aad=(HANDSHAKE_EID + ctr + b"0"))
             tp = Encryption.gen_ed25519(True)
             send_enc(tp[1])
             pub = recv_enc()
+            def send_signed_enc(data):
+                nonlocal sc
+                ctr = sc.to_bytes(8, "big")
+                sc += 1
+                enc = Encryption.encryptGCM(data,ekey,aad=(HANDSHAKE_EID + ctr + b"1"))
+                self._send_q.put((cid,HANDSHAKE_EID,ctr + Encryption.ed25519_sign(tp[0], enc)))
+            def recv_signed_enc():
+                nonlocal rc
+                payload = self._handshakes[cid].get(timeout=5)
+                ctr = payload[:8]
+                _ctr = int.from_bytes(ctr, "big")
+                if _ctr <= rc:raise ProtocolError("Counter Error")
+                rc = _ctr
+                enc = Encryption.ed25519_verify(pub, payload[8:])
+                return Encryption.decryptGCM(enc,ekey,aad=(HANDSHAKE_EID + ctr + b"0"))
             nonce = os.urandom(256)
             send_enc(nonce)
+            if recv_signed_enc() != nonce:raise ProtocolError("Bad Sig")
             cnonce = recv_enc()
-            send_enc(Encryption.ed25519_sign(tp[0], cnonce))
-            if Encryption.ed25519_verify(pub, recv_enc()) != nonce:raise ProtocolError("Bad Sig")
+            send_signed_enc(cnonce)
             with self._lock:
                 self._keys[cid] = ekey
                 self._counters[cid] = [sc, rc]
                 self._handshakes.pop(cid, None)
-        except Exception as e:self._kill_client(cid)
+        except Exception as e:
+            self._kill_client(cid)
     def _kill_client(self, cid):
         with self._lock:
             self._keys.pop(cid, None)
@@ -154,7 +169,7 @@ class TCPServer:
             for eid in dead_eids:
                 self._eid_map.pop(eid, None)
                 self._eid_activity.pop(eid, None)
-            self._seen_eids.pop(eid, None)
+                self._seen_eids.pop(eid, None)
     def _loop(self):
         poller = zmq.Poller()
         poller.register(self.sock, zmq.POLLIN)
@@ -177,8 +192,8 @@ class TCPServer:
                 events = dict(poller.poll(10))
                 if self.sock in events and events[self.sock] == zmq.POLLIN:
                     cid, *_frames=self.sock.recv_multipart()[:3]
-                    if len(_frames)!=3:self._kill_client(cid);continue
-                    cid, eid, payload = _frames
+                    if len(_frames)!=2:self._kill_client(cid);continue
+                    eid, payload = _frames
                     with self._lock:
                         curr = self._q_bytes.get(cid, 0) + len(payload)
                         if curr > MAX_QUEUE_BYTES:
@@ -194,7 +209,7 @@ class TCPServer:
                         continue
                     with self._lock:
                         ekey = self._keys[cid]
-                        if self._eid_map[eid].get(eid,cid)!=cid:continue
+                        if self._eid_map.get(eid,cid)!=cid:continue
                         self._eid_map[eid] = cid
                         self._q_bytes[cid] -= len(payload)
                         if eid != HANDSHAKE_EID:self._eid_activity[eid] = time.time()
@@ -214,7 +229,8 @@ class TCPServer:
                         if should_run:
                             try:self.on_exchange(self, eid, data, cid)
                             except Exception:pass
-            except Exception as e:self._kill_client(cid)
+            except Exception as e:
+                self._kill_client(cid)
         try:
             poller.unregister(self.sock)
             self.sock.close(linger=0)
@@ -237,7 +253,7 @@ class TCPServer:
 class TCPClient:
     def __init__(self,host,port,password,auth_key="./auth_key",auth_key_password_callback=None):
         self.context = zmq.Context()
-        self.sock = zmq.Context().socket(zmq.DEALER)
+        self.sock = self.context.socket(zmq.DEALER)
         self.sock.connect(f"tcp://{host}:{port}")
         self._pending, self._hs_q = {}, queue.Queue(10)
         self._send_q = queue.Queue(10)
@@ -246,7 +262,7 @@ class TCPClient:
         self._lock, self._running = threading.Lock(), True
         self.sc, self.rc, self.ekey = 1, 0, None
         self._q_bytes = 0
-        self._io_thread = threading.Thread(target=self._loop, daemon=True)
+        self._io_thread = threading.Thread(target=self._loop,daemon=True)
         self._io_thread.start()
         is_zip = False
         try:is_zip = zipfile.is_zipfile(auth_key)
@@ -259,29 +275,31 @@ class TCPClient:
                 admin_prv = zf.read("admin.prv")
                 admin_pub = zf.read("admin.pub")
                 salt = zf.read("salt.bin")
-            key = Encryption.kdf_slow(util.str_to_bytes(auth_key_password_callback()), salt)
-            admin_prv = Encryption.decryptGCM(admin_prv, key)
-            admin_pub = Encryption.decryptGCM(admin_pub, key)
+            key = Encryption.kdf_slow(util.str_to_bytes(auth_key_password_callback()),salt)
+            admin_prv = Encryption.decryptGCM(admin_prv,key)
+            admin_pub = Encryption.decryptGCM(admin_pub,key)
             req_tk = Encryption.gen_x25519(True)
-            self._send_q.put([HANDSHAKE_EID, b"REQ_KEY" + req_tk[1]])
+            self._send_q.put([HANDSHAKE_EID,b"REQ_KEY" + req_tk[1]])
             resp = self._hs_q.get(timeout=5)
             stk_len = len(req_tk[1])
             server_stk_pub = resp[:stk_len]
             nonce = resp[stk_len:]
-            tss_req = Encryption.shared_secret(req_tk[0], server_stk_pub)
-            sig = Encryption.ed25519_sign(admin_prv, nonce)
-            self._send_q.put([HANDSHAKE_EID,Encryption.encryptGCM(sig, tss_req)])
-            enc_auth = self._hs_q.get(timeout=5)
-            auth_data = Encryption.decryptGCM(enc_auth, tss_req)
-            auth_pub_len = int.from_bytes(auth_data[:4], "big")
-            auth_pub = auth_data[4:4 + auth_pub_len]
-            auth_pub_sig = auth_data[4 + auth_pub_len:]
-            if Encryption.ed25519_verify(admin_pub, auth_pub_sig) != auth_pub:raise ProtocolError("Bad Server Auth Sig")
+            tss_req = Encryption.shared_secret(req_tk[0],server_stk_pub)
+            self._send_q.put([HANDSHAKE_EID,Encryption.ed25519_sign(admin_prv,Encryption.encryptGCM(nonce,tss_req))])
+            auth_pub = Encryption.decryptGCM(Encryption.ed25519_verify(admin_pub,self._hs_q.get(timeout=5)),tss_req)
+            if not auth_pub:
+                enc_nack = Encryption.encryptGCM(b'0',tss_req)
+                signed_nack = Encryption.ed25519_sign(admin_prv,enc_nack)
+                self._send_q.put([HANDSHAKE_EID,signed_nack])
+                raise ProtocolError("Invalid Server Auth Key")
+            enc_ack = Encryption.encryptGCM(b'1',tss_req)
+            signed_ack = Encryption.ed25519_sign(admin_prv,enc_ack)
+            self._send_q.put([HANDSHAKE_EID,signed_ack])
             salt = os.urandom(SALT_SIZE)
-            self.at_rest_key = _derive_at_rest_key(password, salt)
+            self.at_rest_key = _derive_at_rest_key(password,salt)
             with open(auth_key, "wb") as f:
                 f.write(salt)
-                f.write(Encryption.encryptGCM(auth_pub, self.at_rest_key))
+                f.write(Encryption.encryptGCM(auth_pub,self.at_rest_key))
             pub_key = auth_pub
         else:
             with open(auth_key, "rb") as f:
@@ -289,23 +307,38 @@ class TCPClient:
                 encrypted_pub = f.read()
             if len(salt) != SALT_SIZE:raise ProtocolError("Invalid auth_key: missing salt")
             if not encrypted_pub:raise ProtocolError("Invalid auth_key: missing key data")
-            self.at_rest_key = _derive_at_rest_key(password, salt)
-            pub_key = Encryption.decryptGCM(encrypted_pub, self.at_rest_key)
+            self.at_rest_key = _derive_at_rest_key(password,salt)
+            pub_key = Encryption.decryptGCM(encrypted_pub,self.at_rest_key)
         tk = Encryption.gen_x25519(True)
-        self._send_q.put([HANDSHAKE_EID, tk[1]])
-        tss = Encryption.shared_secret(tk[0],self._hs_q.get(timeout=10))
-        self._send_q.put([HANDSHAKE_EID,Encryption.encryptGCM(Encryption.basic_kdf(pub_key, b"", 6),tss)])
+        self._send_q.put([HANDSHAKE_EID,tk[1]])
+        server_tk_pub = self._hs_q.get(timeout=10)
+        tss = Encryption.shared_secret(tk[0],server_tk_pub)
+        self._send_q.put([HANDSHAKE_EID,Encryption.encryptGCM(Encryption.basic_kdf(pub_key,b"",6),tss)])
         keys = Encryption.gen_x25519(True)
-        self._send_q.put([HANDSHAKE_EID,Encryption.encryptGCM(keys[1], tss)])
-        self.ekey = Encryption.kdf_fast(Encryption.shared_secret(keys[0], pub_key),tss)
+        self._send_q.put([HANDSHAKE_EID,Encryption.encryptGCM(keys[1],tss)])
+        self.ekey = Encryption.kdf_fast(Encryption.shared_secret(keys[0],pub_key),tss)
         tp = Encryption.gen_ed25519(True)
         self._send_enc(HANDSHAKE_EID, tp[1])
         pub = self._recv_enc(HANDSHAKE_EID,self._hs_q.get(timeout=5))
-        nonce = os.urandom(256)
-        self._send_enc(HANDSHAKE_EID, nonce)
-        snonce = self._recv_enc(HANDSHAKE_EID,self._hs_q.get(timeout=5))
-        self._send_enc(HANDSHAKE_EID,Encryption.ed25519_sign(tp[0], snonce))
-        if Encryption.ed25519_verify(pub,self._recv_enc(HANDSHAKE_EID,self._hs_q.get(timeout=5))) != nonce:raise ProtocolError("Bad Sig")
+        def send_signed_enc(data):
+            ctr = self.sc.to_bytes(8, "big")
+            self.sc += 1
+            enc = Encryption.encryptGCM(data,self.ekey,aad=(HANDSHAKE_EID + ctr + b"0"))
+            self._send_q.put([HANDSHAKE_EID,ctr + Encryption.ed25519_sign(tp[0], enc)])
+        def recv_signed_enc():
+            payload = self._hs_q.get(timeout=5)
+            ctr = payload[:8]
+            _ctr = int.from_bytes(ctr, "big")
+            if _ctr <= self.rc:
+                self.close()
+                raise ProtocolError("Counter Error")
+            self.rc = _ctr
+            return Encryption.decryptGCM(Encryption.ed25519_verify(pub, payload[8:]),self.ekey,aad=(HANDSHAKE_EID + ctr + b"1"))
+        nonce = self._recv_enc(HANDSHAKE_EID,self._hs_q.get(timeout=5))
+        send_signed_enc(nonce)
+        cnonce = os.urandom(256)
+        self._send_enc(HANDSHAKE_EID, cnonce)
+        if recv_signed_enc() != cnonce:raise ProtocolError("Bad Sig")
     def _send_enc(self, eid, payload):
         ctr = self.sc.to_bytes(8, "big")
         self.sc += 1
