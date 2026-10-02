@@ -1,5 +1,6 @@
-import os, queue, time, hmac, zmq, threading, zipfile, Encryption, util, traceback
+import os, queue, time, hmac, zmq, threading, zipfile, Encryption, util
 from zxcvbn import zxcvbn
+from concurrent.futures import ThreadPoolExecutor
 HANDSHAKE_EID = b"__HANDSHAKE__"
 MAX_QUEUE_BYTES = 256 * 1024 * 1024
 class ProtocolError(Exception):pass
@@ -43,6 +44,7 @@ def validate_auth_keys(d, at_rest_key):
 class TCPServer:
     def __init__(self, host, port, password, auth_key_password, auth_key_dir="./keys", salt_file="./server_salt.bin", on_exchange=None):
         self.auth_key_dir = auth_key_dir
+        self.pool=ThreadPoolExecutor(32)
         self.on_exchange = on_exchange
         self.auth_key_password=auth_key_password
         self.at_rest_key = _derive_at_rest_key(password, salt_file)
@@ -63,7 +65,7 @@ class TCPServer:
         self._seen_eids = {}
         self._eid_activity = {}
         self._last_cleanup = time.time()
-        self._send_q = queue.Queue()
+        self._send_q = queue.Queue(10)
         self._lock, self._running = threading.Lock(), True
         self._io_thread = threading.Thread(target=self._loop, daemon=True)
         self._io_thread.start()
@@ -138,9 +140,7 @@ class TCPServer:
                 self._keys[cid] = ekey
                 self._counters[cid] = [sc, rc]
                 self._handshakes.pop(cid, None)
-        except Exception as e:
-            traceback.print_exception(e)
-            self._kill_client(cid)
+        except Exception as e:self._kill_client(cid)
     def _kill_client(self, cid):
         with self._lock:
             self._keys.pop(cid, None)
@@ -148,6 +148,11 @@ class TCPServer:
             self._recv_counters.pop(cid, None)
             self._handshakes.pop(cid, None)
             self._q_bytes.pop(cid, None)
+            dead_eids = [eid for eid, owner in self._eid_map.items() if owner == cid]
+            for eid in dead_eids:
+                self._eid_map.pop(eid, None)
+                self._eid_activity.pop(eid, None)
+            self._seen_eids.pop(eid, None)
     def _loop(self):
         poller = zmq.Poller()
         poller.register(self.sock, zmq.POLLIN)
@@ -169,7 +174,9 @@ class TCPServer:
                     self.sock.send_multipart([cid, eid, frames])
                 events = dict(poller.poll(10))
                 if self.sock in events and events[self.sock] == zmq.POLLIN:
-                    cid, eid, payload = self.sock.recv_multipart()[:3]
+                    cid, *_frames=self.sock.recv_multipart()[:3]
+                    if len(_frames)!=3:self._kill_client(cid);continue
+                    cid, eid, payload = _frames
                     with self._lock:
                         curr = self._q_bytes.get(cid, 0) + len(payload)
                         if curr > MAX_QUEUE_BYTES:
@@ -179,12 +186,13 @@ class TCPServer:
                     if cid not in self._keys:
                         with self._lock:
                             if cid not in self._handshakes:
-                                self._handshakes[cid] = queue.Queue()
-                                threading.Thread(target=self._hs_worker, args=(cid, payload), daemon=True).start()
+                                self._handshakes[cid] = queue.Queue(10)
+                                self.pool.submit(self._hs_worker, cid, payload)
                             else:self._handshakes[cid].put(payload)
                         continue
                     with self._lock:
                         ekey = self._keys[cid]
+                        if self._eid_map[eid].get(eid,cid)!=cid:continue
                         self._eid_map[eid] = cid
                         self._q_bytes[cid] -= len(payload)
                         if eid != HANDSHAKE_EID:self._eid_activity[eid] = time.time()
@@ -204,9 +212,7 @@ class TCPServer:
                         if should_run:
                             try:self.on_exchange(self, eid, data, cid)
                             except Exception:pass
-            except Exception as e:
-                traceback.print_exception(e)
-                self._kill_client(cid)
+            except Exception as e:self._kill_client(cid)
         try:
             poller.unregister(self.sock)
             self.sock.close(linger=0)
@@ -231,8 +237,8 @@ class TCPClient:
         self.context = zmq.Context()
         self.sock = zmq.Context().socket(zmq.DEALER)
         self.sock.connect(f"tcp://{host}:{port}")
-        self._pending, self._hs_q = {}, queue.Queue()
-        self._send_q = queue.Queue()
+        self._pending, self._hs_q = {}, queue.Queue(10)
+        self._send_q = queue.Queue(10)
         self._eid_activity = {}
         self._last_cleanup = time.time()
         self._lock, self._running = threading.Lock(), True
@@ -308,7 +314,7 @@ class TCPClient:
     def send(self, payload, eid=None) -> bytes:
         if eid is None:eid = os.urandom(64)
         with self._lock:
-            self._pending[eid] = queue.Queue()
+            self._pending[eid] = queue.Queue(10)
             if eid != HANDSHAKE_EID:self._eid_activity[eid] = time.time()
         self._send_enc(eid, payload)
         return eid
@@ -364,7 +370,6 @@ class TCPClient:
                             with self._lock:self._q_bytes -= payload_len
             except Exception as e:
                 print(f"[!] Network loop died: {type(e).__name__}: {e}")
-                traceback.print_exception(e)
                 break
         try:
             poller.unregister(self.sock)
