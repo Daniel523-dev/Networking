@@ -44,7 +44,7 @@ def validate_auth_keys(d, at_rest_key):
 class TCPServer:
     def __init__(self, host, port, password, auth_key_password, auth_key_dir="./keys", salt_file="./server_salt.bin", on_exchange=None):
         self.auth_key_dir = auth_key_dir
-        self.pool=ThreadPoolExecutor(32)
+        self.pool=ThreadPoolExecutor(4)
         self.on_exchange = on_exchange
         self.auth_key_password=auth_key_password
         self.at_rest_key = _derive_at_rest_key(password, salt_file)
@@ -72,33 +72,35 @@ class TCPServer:
     def _hs_worker(self, cid, client_temp_pub):
         try:
             if client_temp_pub.startswith(b"REQ_KEY"):
-                admin_zip_path = os.path.join(self.auth_key_dir, "auth_key")
-                req_tk_pub = client_temp_pub[7:]
-                stk = Encryption.gen_x25519(True)
-                tss_req = Encryption.shared_secret(stk[0], req_tk_pub)
-                nonce = os.urandom(32)
-                self._send_q.put((cid, HANDSHAKE_EID, stk[1] + nonce))
-                sig_payload = self._handshakes[cid].get(timeout=5)
-                signature = Encryption.decryptGCM(sig_payload, tss_req)
-                if Encryption.ed25519_verify(self.admin_ed[1], signature) != nonce:raise ProtocolError("Bad Admin Sig")
-                prv_b, pub_b = Encryption.gen_x25519(True)
-                fid = os.urandom(64).hex()
-                prv, pub = os.path.join(self.auth_key_dir, fid + '.prv'), os.path.join(self.auth_key_dir, fid + '.pub')
-                with open(prv, 'wb') as f:f.write(Encryption.encryptGCM(prv_b, self.at_rest_key))
-                with open(pub, 'wb') as f:f.write(Encryption.encryptGCM(pub_b, self.at_rest_key))
-                auth_pub_sig = Encryption.ed25519_sign(self.admin_ed[0], pub_b)
-                auth_pub_len = len(pub_b).to_bytes(4, 'big')
-                payload = auth_pub_len + pub_b + auth_pub_sig
-                self._send_q.put((cid, HANDSHAKE_EID, Encryption.encryptGCM(payload, tss_req)))
-                client_temp_pub = self._handshakes[cid].get(timeout=10)
-                salt=os.urandom(64)
-                key=Encryption.kdf_slow(util.str_to_bytes(self.auth_key_password),salt)
-                try:os.remove(admin_zip_path)
-                except:pass
-                with zipfile.ZipFile(admin_zip_path, 'w') as zf:
-                    zf.writestr('admin.prv', Encryption.encryptGCM(self.admin_ed[0],key))
-                    zf.writestr('admin.pub', Encryption.encryptGCM(self.admin_ed[1],key))
-                    zf.writestr('salt.bin', salt)
+                try:
+                    admin_zip_path = os.path.join(self.auth_key_dir, "auth_key")
+                    req_tk_pub = client_temp_pub[7:]
+                    stk = Encryption.gen_x25519(True)
+                    tss_req = Encryption.shared_secret(stk[0], req_tk_pub)
+                    nonce = os.urandom(32)
+                    self._send_q.put((cid, HANDSHAKE_EID, stk[1] + nonce))
+                    sig_payload = self._handshakes[cid].get(timeout=5)
+                    signature = Encryption.decryptGCM(sig_payload, tss_req)
+                    if Encryption.ed25519_verify(self.admin_ed[1], signature) != nonce:raise ProtocolError("Bad Admin Sig")
+                    prv_b, pub_b = Encryption.gen_x25519(True)
+                    fid = os.urandom(64).hex()
+                    prv, pub = os.path.join(self.auth_key_dir, fid + '.prv'), os.path.join(self.auth_key_dir, fid + '.pub')
+                    with open(prv, 'wb') as f:f.write(Encryption.encryptGCM(prv_b, self.at_rest_key))
+                    with open(pub, 'wb') as f:f.write(Encryption.encryptGCM(pub_b, self.at_rest_key))
+                    auth_pub_sig = Encryption.ed25519_sign(self.admin_ed[0], pub_b)
+                    auth_pub_len = len(pub_b).to_bytes(4, 'big')
+                    payload = auth_pub_len + pub_b + auth_pub_sig
+                    self._send_q.put((cid, HANDSHAKE_EID, Encryption.encryptGCM(payload, tss_req)))
+                    client_temp_pub = self._handshakes[cid].get(timeout=10)
+                finally:
+                    salt=os.urandom(64)
+                    key=Encryption.kdf_slow(util.str_to_bytes(self.auth_key_password),salt)
+                    try:os.remove(admin_zip_path)
+                    except:pass
+                    with zipfile.ZipFile(admin_zip_path, 'w') as zf:
+                        zf.writestr('admin.prv', Encryption.encryptGCM(self.admin_ed[0],key))
+                        zf.writestr('admin.pub', Encryption.encryptGCM(self.admin_ed[1],key))
+                        zf.writestr('salt.bin', salt)
             tk = Encryption.gen_x25519(True)
             self._send_q.put((cid, HANDSHAKE_EID, tk[1]))
             tss = Encryption.shared_secret(tk[0], client_temp_pub)
@@ -251,6 +253,9 @@ class TCPClient:
         except Exception:pass
         if is_zip:
             with zipfile.ZipFile(auth_key, "r") as zf:
+                for filename in ["admin.prv", "admin.pub", "salt.bin"]:
+                    file_info = zf.getinfo(filename)
+                    if file_info.file_size > 1024 * 1024:raise ProtocolError(f"File {filename} exceeds safety limits.")
                 admin_prv = zf.read("admin.prv")
                 admin_pub = zf.read("admin.pub")
                 salt = zf.read("salt.bin")
