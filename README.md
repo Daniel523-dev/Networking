@@ -15,8 +15,8 @@ A robust, message-exchange-based networking library that completely abstracts en
 This module implements a defense-in-depth approach to both in-transit and at-rest data:
 
 *   **In-Transit (Wire Protocol):** 
-    *   Diffie-Hellman Key Exchange (X25519) for Perfect Forward Secrecy (PFS).
-    *   Ed25519/Ed448 signatures to prevent Man-in-the-Middle (MitM) attacks.
+    *   Diffie-Hellman Key Exchange (X448) for Perfect Forward Secrecy (PFS).
+    *   Ed448 signatures to prevent Man-in-the-Middle (MitM) attacks.
     *   AES-GCM for authenticated encryption of all payloads.
 *   **At-Rest (Key Storage):**
     *   Long-term identity keys are encrypted on disk using AES-GCM.
