@@ -8,7 +8,8 @@ from datetime import datetime, timedelta, timezone
 from argon2.low_level import hash_secret_raw, Type
 from cryptography.hazmat.primitives import hashes
 from cryptography.x509.oid import NameOID
-import os, hmac, ipaddress, util
+import os, hmac, ipaddress, util, string, secrets
+def gen_id(length=64):return ''.join(secrets.choice(string.ascii_letters+string.digits) for _ in range(length))
 try:
     import blake3
     def HASH(d,l=32,hex=False):
@@ -32,35 +33,25 @@ def kdf_level(LEVEL):
 def kdf_fast(master_pw: bytes, salt: bytes) -> bytes:return kdf(master_pw,salt,0)
 def kdf_slow(master_pw: bytes, salt: bytes) -> bytes:return kdf(master_pw,salt,10)
 def kdf(master_pw,salt,level=5):lvl=kdf_level(level);return hash_secret_raw(secret=master_pw, salt=salt, time_cost=lvl[0], memory_cost=lvl[1], parallelism=lvl[2], hash_len=512, type=Type.ID)
-def _prepare_key(key: bytes) -> bytes:
-    """Validates key length and truncates to 32 bytes (256-bit AES)."""
-    if len(key) < 32:raise ValueError(f"Key length ({len(key)} bytes) is shorter than required 32 bytes")
-    return key[:32]
-def encrypt(data: bytes, key: bytes, secure_kdf: bool = False) -> bytes:
-    key = _prepare_key(key)
-    iv = os.urandom(16)
-    cipher = Cipher(algorithms.AES(key), modes.CTR(iv)).encryptor()
-    return iv + cipher.update(data) + cipher.finalize()
-def decrypt(encrypted: bytes, key: bytes) -> bytes:
-    key = _prepare_key(key)
-    min_len = 16
-    if len(encrypted) < min_len:
-        raise ValueError("Ciphertext too short")
-    iv = encrypted[:16]
-    payload = encrypted[16:]
-    cipher = Cipher(algorithms.AES(key), modes.CTR(iv)).decryptor()
-    return cipher.update(payload) + cipher.finalize()
-def encryptGCM(data: bytes, key: bytes, aad: bytes = None) -> bytes:
-    key = _prepare_key(key)
-    iv = os.urandom(12)
-    return iv + AESGCM(key).encrypt(iv, data, aad)
-def decryptGCM(encrypted: bytes, key: bytes, aad: bytes = None) -> bytes:
-    key = _prepare_key(key)
-    min_len = 28
-    if len(encrypted) < min_len:raise ValueError("Ciphertext too short")
-    iv = encrypted[:12]
-    payload = encrypted[12:]
-    return AESGCM(key).decrypt(iv, payload, aad)
+def encrypt(data: bytes, key: bytes, secure_kdf=False) -> bytes:
+    salt, iv = os.urandom(32), os.urandom(16)
+    cipher = Cipher(AES(kdf_fast(key, salt) if secure_kdf else basic_kdf(key, salt)), modes.CTR(iv)).encryptor()
+    ct, mv = bytearray(iv + salt), memoryview(data)
+    for i in range(0, len(mv), 32768): ct.extend(cipher.update(mv[i:i+32768]))
+    return bytes(ct + cipher.finalize())
+def decrypt(encrypted: bytes, key: bytes, secure_kdf=False) -> bytes:
+    if len(encrypted) < 48: raise ValueError("Ciphertext too short")
+    cipher = Cipher(AES(kdf_fast(key, encrypted[16:48]) if secure_kdf else basic_kdf(key, encrypted[16:48])), modes.CTR(encrypted[:16])).decryptor()
+    mv, out = memoryview(encrypted[48:]), bytearray()
+    for i in range(0, len(mv), 32768): out.extend(cipher.update(mv[i:i+32768]))
+    return bytes(out + cipher.finalize())
+def encryptGCM(data: bytes, key: bytes, secure_kdf=False, aad: bytes = None) -> bytes:
+    salt, iv = os.urandom(32), os.urandom(12)
+    return iv + salt + AESGCM(kdf_fast(key, salt) if secure_kdf else basic_kdf(key, salt)).encrypt(iv, data, aad)
+def decryptGCM(encrypted: bytes, key: bytes, secure_kdf=False, aad: bytes = None) -> bytes:
+    if len(encrypted) < 60:raise ValueError("Ciphertext too short")
+    salt = encrypted[12:44]
+    return AESGCM(kdf_fast(key, salt) if secure_kdf else basic_kdf(key, salt)).decrypt(encrypted[:12], encrypted[44:], aad)
 # generate_tls is black magic, and I don't really trust it THAT much, but it gets the job done
 def generate_tls(cert_path,key_path,common_name="TLS Certificate",country=None,state=None,locality=None,organization=None,organizational_unit=None,email=None,valid_days=3650,san_ips=None,san_dns=None):
     if os.path.exists(cert_path) and os.path.exists(key_path): return
@@ -73,49 +64,14 @@ def generate_tls(cert_path,key_path,common_name="TLS Certificate",country=None,s
     cert=cert.sign(key,hashes.SHA256())
     with open(key_path,"wb") as f: f.write(key.private_bytes(Encoding.PEM,PrivateFormat.PKCS8,NoEncryption()))
     with open(cert_path,"wb") as f: f.write(cert.public_bytes(Encoding.PEM))
-def gen_chacha20() -> bytes:return os.urandom(32)
-def encrypt_chacha(data: bytes, key: bytes, auth=True) -> bytes:
-    if len(key) != 32:raise ValueError("ChaCha20 requires exactly 32-byte keys")
-    salt = os.urandom(32)
-    nonce = os.urandom(12 if auth else 16)
-    k = basic_kdf(key, salt)
-    if auth:ciphertext = ChaCha20Poly1305(k).encrypt(nonce, data, None)
-    else:ciphertext = Cipher(ChaCha20(k, nonce),mode=None).encryptor().update(data)
-    return salt + nonce + ciphertext
-def decrypt_chacha(data: bytes, key: bytes, auth=True) -> bytes:
-    if len(key) != 32:raise ValueError("ChaCha20 requires exactly 32-byte keys")
-    nonce_len = 12 if auth else 16
-    if len(data) < 32 + nonce_len:raise ValueError("Ciphertext too short")
-    salt = data[:32]
-    nonce = data[32:32 + nonce_len]
-    ciphertext = data[32 + nonce_len:]
-    k = basic_kdf(key, salt)
-    if auth:return ChaCha20Poly1305(k).decrypt(nonce,ciphertext,None)
-    return Cipher(ChaCha20(k, nonce),mode=None).decryptor().update(ciphertext)
-def gen_x25519(overkill=False) -> tuple[bytes, bytes]:
-    private_key = (x448.X448PrivateKey if overkill else x25519.X25519PrivateKey).generate()
-    return (private_key.private_bytes(encoding=Encoding.Raw,format=PrivateFormat.Raw,encryption_algorithm=NoEncryption()),private_key.public_key().public_bytes(encoding=Encoding.Raw,format=PublicFormat.Raw))
-def shared_secret(prv: bytes, pub: bytes) -> bytes:
-    if len(prv) == 32:
-        if len(pub) != 32:raise ValueError("X25519 private/public key size mismatch")
-        return x25519.X25519PrivateKey.from_private_bytes(prv).exchange(x25519.X25519PublicKey.from_public_bytes(pub))
-    if len(prv) == 56:
-        if len(pub) != 56:raise ValueError("X448 private/public key size mismatch")
-        return x448.X448PrivateKey.from_private_bytes(prv).exchange(x448.X448PublicKey.from_public_bytes(pub))
-    raise ValueError("Unsupported X25519/X448 private key length")
-def gen_ed25519(overkill=False) -> tuple[bytes, bytes]:
-    private_key = (ed448.Ed448PrivateKey if overkill else ed25519.Ed25519PrivateKey).generate()
-    return (private_key.private_bytes(encoding=Encoding.Raw,format=PrivateFormat.Raw,encryption_algorithm=NoEncryption()),private_key.public_key().public_bytes(encoding=Encoding.Raw,format=PublicFormat.Raw))
-def ed25519_sign(prv: bytes, data: bytes) -> bytes:return load_keys(prv, type=1).sign(data) + data
-def ed25519_verify(pub: bytes, data: bytes) -> bytes:
-    if len(pub) == 32:sig_len = 64
-    elif len(pub) == 57:sig_len = 114
-    else:raise ValueError("Unsupported Ed25519/Ed448 public key length")
-    if len(data) < sig_len:raise ValueError("Signed message is shorter than its signature")
-    signature = data[:sig_len]
-    payload = data[sig_len:]
-    load_keys(pub, type=2).verify(signature, payload)
-    return payload
+def gen_chacha20(password=None) -> bytes:k = os.urandom(32); return encryptGCM(k, password, True) if password else k
+def encrypt_chacha(data: bytes, key: bytes, auth=True, secure_kdf=False, password=None) -> bytes:s, n, rk = os.urandom(32), os.urandom(12 if auth else 16), (decryptGCM(key, password, True) if password is not None else key);k = kdf_fast(rk, s) if secure_kdf else basic_kdf(rk, s);return s + n + (ChaCha20Poly1305(k).encrypt(n, data, None) if auth else Cipher(ChaCha20(k, n), mode=None).encryptor().update(data))
+def decrypt_chacha(data: bytes, key: bytes, auth=True, secure_kdf=False, password=None) -> bytes:nl = 12 if auth else 16; (len(data) < 32 + nl) and (_ for _ in ()).throw(ValueError("Ciphertext too short"));rk = decryptGCM(key, password, True) if password is not None else key;k = kdf_fast(rk, data[:32]) if secure_kdf else basic_kdf(rk, data[:32]);return ChaCha20Poly1305(k).decrypt(data[32:32+nl], data[32+nl:], None) if auth else Cipher(ChaCha20(k, data[32:32+nl]), mode=None).decryptor().update(data[32+nl:])
+def gen_x25519(overkill=False) -> tuple[bytes, bytes]: return (private_key.private_bytes(encoding=Encoding.Raw, format=PrivateFormat.Raw, encryption_algorithm=NoEncryption()), private_key.public_key().public_bytes(encoding=Encoding.Raw, format=PublicFormat.Raw)) if (private_key := (x448.X448PrivateKey if overkill else x25519.X25519PrivateKey).generate()) else None
+def shared_secret(prv: bytes, pub: bytes) -> bytes:return (x25519.X25519PrivateKey if len(prv)==32 else x448.X448PrivateKey).from_private_bytes(prv).exchange((x25519.X25519PublicKey if len(prv)==32 else x448.X448PublicKey).from_public_bytes(pub))
+def gen_ed25519(overkill=False, password=None) -> tuple[bytes, bytes]: return (encryptGCM(prv, password, True) if password else prv, private_key.public_key().public_bytes(encoding=Encoding.Raw, format=PublicFormat.Raw)) if (prv := (private_key := (ed448.Ed448PrivateKey if overkill else ed25519.Ed25519PrivateKey).generate()).private_bytes(encoding=Encoding.Raw, format=PrivateFormat.Raw, encryption_algorithm=NoEncryption())) else None
+def ed25519_sign(prv: bytes, data: bytes) -> bytes:return load_keys(prv,type=1).sign(data) + data
+def ed25519_verify(pub: bytes, data: bytes) -> bytes:load_keys(pub, type=2).verify(data[:114 if len(pub) == 57 else 64], data[114 if len(pub) == 57 else 64:]);return data[114 if len(pub) == 57 else 64:]
 def gen_CA(prv_path,pub_path,cert_path,password=None,common_name=None,country=None,state=None,locality=None,organization=None,organizational_unit=None,email=None,valid_days=3650,overkill=False):
     prv = ed448.Ed448PrivateKey.generate() if overkill else ed25519.Ed25519PrivateKey.generate()
     pub=prv.public_key()
